@@ -1,6 +1,6 @@
 {
-  "name": "lisk-interchain",
-  "version": "1.5.0",
+  "name": "leasehold-interchain",
+  "version": "1.0.0",
   "description": "Custom peer selector plugin for Lisk interchain.",
   "main": "index.js",
   "scripts": {

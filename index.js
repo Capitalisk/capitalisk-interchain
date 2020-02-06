@@ -1,10 +1,11 @@
 const shuffle = require('lodash.shuffle');
-const { InMemoryChannel } = require('lisk-framework/src/controller/channels');
 const url = require('url');
 
-let defaultSelectForRequestFunction;
-let defaultSelectForSendFunction;
-let defaultSelectForConnectionFunction;
+const {
+  randomizedSelectForConnectionFunction,
+  randomizedSelectForRequestFunction,
+  randomizedSelectForSendFunction
+} = require('./randomized-selection');
 
 function removeQueryString(string) {
   return string.replace(/\?.*$/, '');
@@ -92,14 +93,11 @@ function doesPeerMatchRoute(peerInfo, routeString) {
 }
 
 function interchainSelectForConnection(input) {
-  if (!defaultSelectForConnectionFunction) {
-    return [];
-  }
   let knownPeers = [...input.newPeers, ...input.triedPeers];
   let nodeInfo = this.nodeInfo || {};
   let nodeModulesList = Object.keys(nodeInfo.modules || {});
 
-  let selectedPeers = defaultSelectForConnectionFunction({
+  let selectedPeers = randomizedSelectForConnectionFunction({
     ...input,
     nodeInfo: this.nodeInfo
   });
@@ -176,9 +174,6 @@ function interchainSelectForConnection(input) {
 }
 
 function interchainSelectForRequest(input) {
-  if (!defaultSelectForRequestFunction) {
-    return [];
-  }
   let {nodeInfo, peers, peerLimit, requestPacket} = input;
 
   let {routeString, sanitizedAction} = parseAction(requestPacket.procedure);
@@ -189,19 +184,16 @@ function interchainSelectForRequest(input) {
     if (!matchingPeers.length) {
       return [];
     }
-    return defaultSelectForRequestFunction({
+    return randomizedSelectForRequestFunction({
       ...input,
       peers: matchingPeers
     });
   }
 
-  return defaultSelectForRequestFunction(input);
+  return randomizedSelectForRequestFunction(input);
 }
 
 function interchainSelectForSend(input) {
-  if (!defaultSelectForSendFunction) {
-    return [];
-  }
   let {nodeInfo, peers, peerLimit, messagePacket} = input;
 
   let {routeString, sanitizedAction} = parseAction(messagePacket.event);
@@ -212,63 +204,17 @@ function interchainSelectForSend(input) {
     if (!matchingPeers.length) {
       return [];
     }
-    return defaultSelectForSendFunction({
+    return randomizedSelectForSendFunction({
       ...input,
       peers: matchingPeers
     });
   }
 
-  return defaultSelectForSendFunction(input);
+  return randomizedSelectForSendFunction(input);
 }
 
-let interchainState = {};
-
-let interchainChannel = new InMemoryChannel(
-  'interchain',
-  [],
-  {
-    getComponentConfig: {
-      handler: (action) => this.config.components[action.params],
-    },
-    getModuleState: {
-      handler: (action) => interchainState[action.params.moduleName],
-    },
-    updateModuleState: {
-      handler: (action) => {
-        interchainState = {
-          ...interchainState,
-          ...action.params
-        };
-      },
-    },
-  },
-  { skipInternalEvents: true },
-);
-
-function attachInterchain(app) {
-  let realLoadFunction = app.getModule('network').prototype.load;
-
-  app.getModule('network').prototype.load = async function (channel) {
-    interchainChannel.registerToBus(app.controller.bus);
-    await realLoadFunction.call(this, channel);
-
-    let realApplyNodeInfoFunction = this.network.p2p.applyNodeInfo;
-    this.network.p2p.applyNodeInfo = function (nodeInfo) {
-      let extendedNodeInfo = {
-        ...nodeInfo,
-        modules: interchainState
-      };
-      realApplyNodeInfoFunction.call(this, extendedNodeInfo);
-    };
-
-    defaultSelectForRequestFunction = this.network.p2p._peerPool._peerSelectForRequest;
-    defaultSelectForSendFunction = this.network.p2p._peerPool._peerSelectForSend;
-    defaultSelectForConnectionFunction = this.network.p2p._peerPool._peerSelectForConnection;
-
-    this.network.p2p._peerPool._peerSelectForRequest = interchainSelectForRequest;
-    this.network.p2p._peerPool._peerSelectForSend = interchainSelectForSend;
-    this.network.p2p._peerPool._peerSelectForConnection = interchainSelectForConnection;
-  };
-}
-
-module.exports = attachInterchain;
+module.exports = {
+  peerSelectionForConnection: interchainSelectForConnection,
+  peerSelectionForRequest: interchainSelectForRequest,
+  peerSelectionForSend: interchainSelectForSend
+};
