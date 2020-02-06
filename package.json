@@ -1,6 +1,6 @@
 {
   "name": "leasehold-interchain",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Custom peer selector plugin for Lisk interchain.",
   "main": "index.js",
   "scripts": {
@@ -23,7 +23,6 @@
   },
   "homepage": "https://github.com/jondubois/lisk-interchain#readme",
   "dependencies": {
-    "lisk-framework": "^0.4.4",
     "lodash.shuffle": "^4.2.0"
   }
 }
