@@ -2,7 +2,6 @@ const shuffle = require('lodash.shuffle');
 const url = require('url');
 
 const {
-  randomizedSelectForConnectionFunction,
   randomizedSelectForRequestFunction,
   randomizedSelectForSendFunction
 } = require('./randomized-selection');
@@ -93,84 +92,99 @@ function doesPeerMatchRoute(peerInfo, routeString) {
 }
 
 function interchainSelectForConnection(input) {
-  let knownPeers = [...input.newPeers, ...input.triedPeers];
+  let disconnectedKnownPeers = [...input.disconnectedNewPeers, ...input.disconnectedTriedPeers];
+  let connectedKnownPeers = [...input.connectedNewPeers, ...input.connectedTriedPeers];
   let nodeInfo = this.nodeInfo || {};
-  let nodeModulesList = Object.keys(nodeInfo.modules || {});
+  let nodeModulesList = Object.keys(nodeInfo.modules || {}).filter((moduleName) => moduleName != null);
+  let maxPeersToAllocatePerModule = Math.ceil(input.maxOutboundPeerCount / nodeModulesList.length);
 
-  let selectedPeers = randomizedSelectForConnectionFunction({
-    ...input,
-    nodeInfo: this.nodeInfo
-  });
-
-  let chosenPeersLookup = {};
-  selectedPeers.forEach((peerInfo) => {
-    chosenPeersLookup[`${peerInfo.ipAddress}:${peerInfo.wsPort}`] = true;
-  });
-
-  let matchingPeers = [];
-  let maxPeersToAllocatePerModule = Math.ceil(input.peerLimit / nodeModulesList.length);
+  let disconnectedModulePeerMap = {};
+  let moduleQuotas = [];
 
   nodeModulesList.forEach((moduleName) => {
-    let matchingModulePeers = knownPeers
-    .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName])
-    .sort((peerInfoA, peerInfoB) => {
-      let peerAScore = getPeerModuleMatchScore(nodeInfo, peerInfoA, moduleName);
-      let peerBScore = getPeerModuleMatchScore(nodeInfo, peerInfoB, moduleName);
-      if (peerAScore > peerBScore) {
-        return -1;
-      }
-      if (peerAScore < peerBScore) {
-        return 1;
-      }
-      return 0;
-    })
-    .slice(0, maxPeersToAllocatePerModule);
-    matchingModulePeers.forEach((peerInfo) => {
-      let peerId = `${peerInfo.ipAddress}:${peerInfo.wsPort}`;
-      if (!chosenPeersLookup[peerId]) {
-        chosenPeersLookup[peerId] = true;
-        matchingPeers.push(peerInfo);
-      }
+    let disconnectedModulePeers = disconnectedKnownPeers
+      .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName])
+      .sort((peerInfoA, peerInfoB) => {
+        let peerAScore = getPeerModuleMatchScore(nodeInfo, peerInfoA, moduleName);
+        let peerBScore = getPeerModuleMatchScore(nodeInfo, peerInfoB, moduleName);
+        if (peerAScore > peerBScore) {
+          return 1;
+        }
+        if (peerAScore < peerBScore) {
+          return -1;
+        }
+        return Math.random() < .5 ? -1 : 1;
+      })
+      .slice(0, maxPeersToAllocatePerModule);
+
+    disconnectedModulePeerMap[moduleName] = disconnectedModulePeers;
+
+    let connectedModulePeers = connectedKnownPeers
+      .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName]);
+
+    moduleQuotas.push({
+      moduleName,
+      quota: maxPeersToAllocatePerModule - connectedModulePeers.length
     });
   });
 
-  matchingPeers = shuffle(matchingPeers);
+  let filterUnrelatedPeers = (peerInfo) => {
+    if (!peerInfo.modules) {
+      return true;
+    }
+    return nodeModulesList.every((moduleName) => !peerInfo.modules[moduleName]);
+  };
 
-  let padPeersCount = selectedPeers.length - matchingPeers.length;
-  let paddingPeers = [];
+  let disconnectedUnrelatedPeers = disconnectedKnownPeers.filter(filterUnrelatedPeers);
+  shuffle(disconnectedUnrelatedPeers);
 
-  // Pad the matchingPeers list with unknown peers to increase the chance of discovery.
-  // This is useful for very small, newly created subnets.
-  if (padPeersCount > 0) {
-    let untriedPeers = shuffle(knownPeers.filter((peerInfo) => !peerInfo.protocolVersion));
-    for (let i = 0; i < padPeersCount; i++) {
-      let lastUntriedPeer = untriedPeers.pop();
-      if (lastUntriedPeer) {
-        let peerId = `${lastUntriedPeer.ipAddress}:${lastUntriedPeer.wsPort}`;
-        if (!chosenPeersLookup[peerId]) {
-          chosenPeersLookup[peerId] = true;
-          paddingPeers.push(lastUntriedPeer);
-        }
+  let connectedUnrelatedPeers = connectedKnownPeers.filter(filterUnrelatedPeers);
+
+  moduleQuotas.push({
+    moduleName: null,
+    quota: maxPeersToAllocatePerModule - connectedUnrelatedPeers.length;
+  });
+
+  let sortModuleQuotas = (quotaA, quotaB) => {
+    if (quotaA.quota > quotaB.quota) {
+      return 1;
+    }
+    if (quotaA.quota < quotaB.quota) {
+      return -1;
+    }
+    return Math.random() < .5 ? -1 : 1;
+  };
+
+  moduleQuotas.sort(sortModuleQuotas);
+
+  let peerLimit = input.maxOutboundPeerCount - input.outboundPeerCount;
+  let selectedPeerMap = new Map();
+
+  while (selectedPeerMap.size < peerLimit) {
+    let topModuleQuota = moduleQuotas[moduleQuotas.length - 1];
+    let targetPeers;
+    if (topModuleQuota.moduleName === null) {
+      targetPeers = disconnectedUnrelatedPeers;
+    } else {
+      targetPeers = disconnectedModulePeerMap[topModuleQuota.moduleName];
+    }
+    if (targetPeers.length) {
+      let peerInfo = targetPeers.pop();
+      let peerId = `${peerInfo.ipAddress}:${peerInfo.wsPort}`;
+      if (!selectedPeerMap.has(peerId)) {
+        selectedPeerMap.set(peerId, peerInfo);
+        topModuleQuota.quota--;
+        moduleQuotas.sort(sortModuleQuotas);
+      }
+    } else {
+      moduleQuotas.pop();
+      if (!moduleQuotas.length) {
+        break;
       }
     }
   }
 
-  matchingPeers = paddingPeers.concat(matchingPeers);
-
-  let regularPeerSelectionProbability = 1 / (nodeModulesList.length + 1);
-
-  selectedPeers = selectedPeers.map((defaultPeer) => {
-    if (Math.random() > regularPeerSelectionProbability) {
-      let lastMatchingPeer = matchingPeers.pop();
-      if (lastMatchingPeer) {
-        return lastMatchingPeer;
-      }
-      return defaultPeer;
-    }
-    return defaultPeer;
-  });
-
-  return selectedPeers;
+  return [...selectedPeerMap.values()];
 }
 
 function interchainSelectForRequest(input) {
