@@ -6,6 +6,8 @@ const {
   randomizedSelectForSendFunction
 } = require('./randomized-selection');
 
+const PEER_KIND_OUTBOUND = 'outbound';
+
 function removeQueryString(string) {
   return string.replace(/\?.*$/, '');
 }
@@ -94,13 +96,12 @@ function doesPeerMatchRoute(peerInfo, routeString) {
 function interchainSelectForConnection(input) {
   let disconnectedKnownPeers = [...input.disconnectedNewPeers, ...input.disconnectedTriedPeers];
   let connectedKnownPeers = [...input.connectedNewPeers, ...input.connectedTriedPeers];
-  let nodeInfo = this.nodeInfo || {};
+  let nodeInfo = input.nodeInfo || {};
   let nodeModulesList = Object.keys(nodeInfo.modules || {}).filter((moduleName) => moduleName != null);
-  let maxPeersToAllocatePerModule = Math.ceil(input.maxOutboundPeerCount / nodeModulesList.length);
+  let maxPeersToAllocatePerModule = input.maxOutboundPeerCount;
 
   let disconnectedModulePeerMap = {};
   let moduleQuotas = [];
-
   nodeModulesList.forEach((moduleName) => {
     let disconnectedModulePeers = disconnectedKnownPeers
       .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName])
@@ -119,12 +120,12 @@ function interchainSelectForConnection(input) {
 
     disconnectedModulePeerMap[moduleName] = disconnectedModulePeers;
 
-    let connectedModulePeers = connectedKnownPeers
-      .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName]);
+    let outboundConnectedModulePeers = connectedKnownPeers
+      .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND && peerInfo.modules && peerInfo.modules[moduleName]);
 
     moduleQuotas.push({
       moduleName,
-      quota: maxPeersToAllocatePerModule - connectedModulePeers.length
+      quota: maxPeersToAllocatePerModule - outboundConnectedModulePeers.length
     });
   });
 
@@ -138,11 +139,13 @@ function interchainSelectForConnection(input) {
   let disconnectedUnrelatedPeers = disconnectedKnownPeers.filter(filterUnrelatedPeers);
   shuffle(disconnectedUnrelatedPeers);
 
-  let connectedUnrelatedPeers = connectedKnownPeers.filter(filterUnrelatedPeers);
+  let outboundConnectedUnrelatedPeers = connectedKnownPeers
+    .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND)
+    .filter(filterUnrelatedPeers);
 
   moduleQuotas.push({
     moduleName: null,
-    quota: maxPeersToAllocatePerModule - connectedUnrelatedPeers.length;
+    quota: maxPeersToAllocatePerModule - outboundConnectedUnrelatedPeers.length
   });
 
   let sortModuleQuotas = (quotaA, quotaB) => {
@@ -157,11 +160,14 @@ function interchainSelectForConnection(input) {
 
   moduleQuotas.sort(sortModuleQuotas);
 
-  let peerLimit = input.maxOutboundPeerCount - input.outboundPeerCount;
+  let peerLimit = (input.maxOutboundPeerCount * moduleQuotas.length) - input.outboundPeerCount;
   let selectedPeerMap = new Map();
 
   while (selectedPeerMap.size < peerLimit) {
     let topModuleQuota = moduleQuotas[moduleQuotas.length - 1];
+    if (topModuleQuota.quota < 1) {
+      break;
+    }
     let targetPeers;
     if (topModuleQuota.moduleName === null) {
       targetPeers = disconnectedUnrelatedPeers;
