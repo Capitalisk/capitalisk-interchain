@@ -193,14 +193,46 @@ function interchainSelectForConnection(input) {
   return [...selectedPeerMap.values()];
 }
 
+function selectUniqueMatchingPeersByIp(peerList, routeString) {
+  let uniquePeerGroups = {};
+  for (let peerInfo of peerList) {
+    if (!doesPeerMatchRoute(peerInfo, routeString)) {
+      continue;
+    }
+    if (!uniquePeerGroups[peerInfo.ipAddress]) {
+      uniquePeerGroups[peerInfo.ipAddress] = [];
+    }
+    uniquePeerGroups[peerInfo.ipAddress].push(peerInfo);
+  }
+  let uniquePeerGroupList = Object.values(uniquePeerGroups);
+  return uniquePeerGroupList.map((peerGroup) => {
+    let randomIndex = Math.floor(Math.random() * peerGroup.length);
+    return peerGroup[randomIndex];
+  });
+}
+
 function interchainSelectForRequest(input) {
-  let {nodeInfo, peers, peerLimit, requestPacket} = input;
+  let {peers, peerLimit, requestPacket} = input;
 
   let {routeString, sanitizedAction} = parseAction(requestPacket.procedure);
   requestPacket.procedure = sanitizedAction;
 
   if (routeString) {
-    let matchingPeers = peers.filter((peerInfo) => doesPeerMatchRoute(peerInfo, routeString));
+    let matchingPeers;
+    let outboundPeers = peers.filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND);
+    let outboundMatchingPeers = selectUniqueMatchingPeersByIp(outboundPeers, routeString);
+    let unmetPeerQuota = peerLimit - outboundMatchingPeers.length;
+    if (unmetPeerQuota > 0) {
+      let inboundPeers = peers.filter((peerInfo) => peerInfo.kind !== PEER_KIND_OUTBOUND);
+      let inboundMatchingPeers = selectUniqueMatchingPeersByIp(inboundPeers, routeString);
+      let randomInboundMatchingPeers = shuffle(inboundMatchingPeers).slice(0, unmetPeerQuota);
+      matchingPeers = [
+        ...outboundMatchingPeers,
+        ...randomInboundMatchingPeers
+      ];
+    } else {
+      matchingPeers = outboundMatchingPeers;
+    }
     if (!matchingPeers.length) {
       return [];
     }
@@ -214,7 +246,7 @@ function interchainSelectForRequest(input) {
 }
 
 function interchainSelectForSend(input) {
-  let {nodeInfo, peers, peerLimit, messagePacket} = input;
+  let {peers, messagePacket} = input;
 
   let {routeString, sanitizedAction} = parseAction(messagePacket.event);
   messagePacket.event = sanitizedAction;
