@@ -130,8 +130,7 @@ function interchainSelectForConnection(input) {
   });
 
   let filterUnrelatedPeers = (peerInfo) => {
-    if (!!nodeInfo.modules !== !!peerInfo.modules) {
-      // If our node has custom modules but the peer does not, or vice-versa, then the peer is unrelated.
+    if (!peerInfo.modules) {
       return true;
     }
     return nodeModulesList.every((moduleName) => !peerInfo.modules[moduleName]);
