@@ -103,22 +103,28 @@ function interchainSelectForConnection(input) {
   let disconnectedModulePeerMap = {};
   let moduleQuotas = [];
   nodeModulesList.forEach((moduleName) => {
+    let maxSimilarPeersToAllocate = Math.round(maxPeersToAllocatePerModule / 2);
     let disconnectedModulePeers = disconnectedKnownPeers
-      .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName])
+      .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName]);
+    let sortedDisconnectedModulePeers = disconnectedModulePeers
       .sort((peerInfoA, peerInfoB) => {
         let peerAScore = getPeerModuleMatchScore(nodeInfo, peerInfoA, moduleName);
         let peerBScore = getPeerModuleMatchScore(nodeInfo, peerInfoB, moduleName);
         if (peerAScore > peerBScore) {
-          return 1;
-        }
-        if (peerAScore < peerBScore) {
           return -1;
         }
+        if (peerAScore < peerBScore) {
+          return 1;
+        }
         return Math.random() < .5 ? -1 : 1;
-      })
-      .slice(0, maxPeersToAllocatePerModule);
+      });
+    let mostSimilarDisconnectedModulePeers = sortedDisconnectedModulePeers
+      .slice(0, maxSimilarPeersToAllocate);
+    let remainingModulePeers = shuffle(sortedDisconnectedModulePeers.slice(maxSimilarPeersToAllocate));
+    let remainingPeersToAllocate = maxPeersToAllocatePerModule - maxSimilarPeersToAllocate;
+    let randomModulePeers = remainingModulePeers.slice(0, remainingPeersToAllocate);
 
-    disconnectedModulePeerMap[moduleName] = disconnectedModulePeers;
+    disconnectedModulePeerMap[moduleName] = [...mostSimilarDisconnectedModulePeers, ...randomModulePeers];
 
     let outboundConnectedModulePeers = connectedKnownPeers
       .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND && peerInfo.modules && peerInfo.modules[moduleName]);
