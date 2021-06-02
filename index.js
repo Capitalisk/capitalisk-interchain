@@ -85,11 +85,11 @@ function doesPeerMatchRoute(peerInfo, routeString) {
     if (!moduleData) {
       return false;
     }
-    let peerHasAllRequiredModuleFields;
+    let peerHasRequiredModuleFields;
 
     let match = query.match;
     if (match === 'or') {
-      peerHasAllRequiredModuleFields = Object.keys(query).some(
+      peerHasRequiredModuleFields = Object.keys(query).some(
         (field) => {
           let moduleValue = moduleData[field];
           let queryValue = query[field];
@@ -100,14 +100,14 @@ function doesPeerMatchRoute(peerInfo, routeString) {
         }
       );
     } else {
-      peerHasAllRequiredModuleFields = Object.keys(query).every(
+      peerHasRequiredModuleFields = Object.keys(query).every(
         (field) => {
           return doValuesMatch(moduleData[field], query[field]);
         }
       );
     }
 
-    if (!peerHasAllRequiredModuleFields) {
+    if (!peerHasRequiredModuleFields) {
       return false;
     }
   }
