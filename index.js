@@ -58,6 +58,13 @@ function getPeerModuleMatchScore(nodeInfo, peerInfo, moduleName) {
   }, 0);
 }
 
+function doValuesMatch(moduleValue, queryValue) {
+  if (typeof moduleValue === 'number') {
+    return moduleValue === Number(queryValue);
+  }
+  return moduleValue === queryValue;
+}
+
 function doesPeerMatchRoute(peerInfo, routeString) {
   if (!routeString) {
     return true;
@@ -78,14 +85,28 @@ function doesPeerMatchRoute(peerInfo, routeString) {
     if (!moduleData) {
       return false;
     }
-    let peerHasAllRequiredModuleFields = Object.keys(query).every(
-      (field) => {
-        if (typeof moduleData[field] === 'number') {
-          return moduleData[field] === Number(query[field]);
+    let peerHasAllRequiredModuleFields;
+
+    let match = query.match;
+    if (match === 'or') {
+      peerHasAllRequiredModuleFields = Object.keys(query).some(
+        (field) => {
+          let moduleValue = moduleData[field];
+          let queryValue = query[field];
+          if (Array.isArray(queryValue)) {
+            return queryValue.some((value) => doValuesMatch(moduleValue, value));
+          }
+          return doValuesMatch(moduleValue, queryValue);
         }
-        return moduleData[field] === query[field];
-      }
-    );
+      );
+    } else {
+      peerHasAllRequiredModuleFields = Object.keys(query).every(
+        (field) => {
+          return doValuesMatch(moduleData[field], query[field]);
+        }
+      );
+    }
+
     if (!peerHasAllRequiredModuleFields) {
       return false;
     }
