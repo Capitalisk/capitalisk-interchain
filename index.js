@@ -238,27 +238,15 @@ function selectUniqueMatchingPeersByIp(peerList, routeString) {
 }
 
 function interchainSelectForRequest(input) {
-  let {peers, peerLimit, requestPacket} = input;
+  let {peers, requestPacket} = input;
 
   let {routeString, sanitizedAction} = parseAction(requestPacket.procedure);
   requestPacket.procedure = sanitizedAction;
 
+  let outboundPeers = peers.filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND);
+
   if (routeString) {
-    let matchingPeers;
-    let outboundPeers = peers.filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND);
-    let outboundMatchingPeers = selectUniqueMatchingPeersByIp(outboundPeers, routeString);
-    let unmetPeerQuota = peerLimit - outboundMatchingPeers.length;
-    if (unmetPeerQuota > 0) {
-      let inboundPeers = peers.filter((peerInfo) => peerInfo.kind !== PEER_KIND_OUTBOUND);
-      let inboundMatchingPeers = selectUniqueMatchingPeersByIp(inboundPeers, routeString);
-      let randomInboundMatchingPeers = shuffle(inboundMatchingPeers).slice(0, unmetPeerQuota);
-      matchingPeers = [
-        ...outboundMatchingPeers,
-        ...randomInboundMatchingPeers
-      ];
-    } else {
-      matchingPeers = outboundMatchingPeers;
-    }
+    let matchingPeers = selectUniqueMatchingPeersByIp(outboundPeers, routeString);
     if (!matchingPeers.length) {
       return [];
     }
@@ -268,17 +256,27 @@ function interchainSelectForRequest(input) {
     });
   }
 
-  return randomizedSelectForRequestFunction(input);
+  return randomizedSelectForRequestFunction({
+    ...input,
+    peers: outboundPeers
+  });
 }
 
 function interchainSelectForSend(input) {
   let {peers, messagePacket} = input;
+  let uniquePeers = {};
+  for (let peer of peers) {
+    if (!uniquePeers[peer.ipAddress] || Math.random() < .5) {
+      uniquePeers[peer.ipAddress] = peer;
+    }
+  }
+  let uniquePeerList = Object.values(uniquePeers);
 
   let {routeString, sanitizedAction} = parseAction(messagePacket.event);
   messagePacket.event = sanitizedAction;
 
   if (routeString) {
-    let matchingPeers = peers.filter((peerInfo) => doesPeerMatchRoute(peerInfo, routeString));
+    let matchingPeers = uniquePeerList.filter((peerInfo) => doesPeerMatchRoute(peerInfo, routeString));
     if (!matchingPeers.length) {
       return [];
     }
@@ -288,7 +286,10 @@ function interchainSelectForSend(input) {
     });
   }
 
-  return randomizedSelectForSendFunction(input);
+  return randomizedSelectForSendFunction({
+    ...input,
+    peers: uniquePeerList
+  });
 }
 
 module.exports = {
