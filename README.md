@@ -1,2 +1,2 @@
-# leasehold-interchain
-Custom peer matching plugin for Lisk interchain optimized to work with LDEM.
+# capitalisk-interchain
+Custom peer matching plugin for Capitalisk Interchain optimized to work with LDEM.
