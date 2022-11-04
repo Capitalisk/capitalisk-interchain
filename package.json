@@ -1,6 +1,6 @@
 {
   "name": "capitalisk-interchain",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "Custom peer selector plugin for Lisk interchain.",
   "main": "index.js",
   "scripts": {
