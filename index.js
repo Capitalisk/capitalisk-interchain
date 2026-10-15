@@ -1,5 +1,4 @@
 const shuffle = require('lodash.shuffle');
-const url = require('url');
 
 const {
   randomizedSelectForRequestFunction,
@@ -65,6 +64,31 @@ function doValuesMatch(moduleValue, queryValue) {
   return moduleValue === queryValue;
 }
 
+function parseRouteRequirement(requirementString) {
+  let [pathAndQuery] = requirementString.split('#');
+  let queryStringIndex = pathAndQuery.indexOf('?');
+  if (queryStringIndex === -1) {
+    return {
+      pathname: pathAndQuery,
+      query: Object.create(null)
+    };
+  }
+  let pathname = pathAndQuery.slice(0, queryStringIndex);
+  let searchParams = new URLSearchParams(pathAndQuery.slice(queryStringIndex + 1));
+  let query = Object.create(null);
+  for (let [field, value] of searchParams) {
+    let existingValue = query[field];
+    if (existingValue === undefined) {
+      query[field] = value;
+    } else if (Array.isArray(existingValue)) {
+      existingValue.push(value);
+    } else {
+      query[field] = [existingValue, value];
+    }
+  }
+  return {pathname, query};
+}
+
 function doesPeerMatchRoute(peerInfo, routeString) {
   if (!routeString) {
     return true;
@@ -74,13 +98,7 @@ function doesPeerMatchRoute(peerInfo, routeString) {
   }
   let routeStringParts = routeString.split(',');
   for (let requirementString of routeStringParts) {
-    let requirementParts;
-    try {
-      requirementParts = url.parse(requirementString, true);
-    } catch (error) {
-      return false;
-    }
-    let {pathname, query} = requirementParts;
+    let {pathname, query} = parseRouteRequirement(requirementString);
     let moduleData = peerInfo.modules[pathname];
     if (!moduleData) {
       return false;
