@@ -1,4 +1,8 @@
-const shuffle = require('lodash.shuffle');
+const {
+  secureRandomInt,
+  secureRandomBoolean,
+  secureShuffle
+} = require('./secure-random');
 
 const {
   randomizedSelectForRequestFunction,
@@ -6,6 +10,23 @@ const {
 } = require('./randomized-selection');
 
 const PEER_KIND_OUTBOUND = 'outbound';
+
+// Caps so that one host cannot claim every outbound slot and eclipse the node.
+const DEFAULT_MAX_OUTBOUND_PEERS_PER_IP_ADDRESS = 2;
+const DEFAULT_MAX_OUTBOUND_PEERS_PER_SUBNET = 3;
+
+// Module and field names are remote-supplied, so re-key them into a
+// null-prototype map: __proto__ or toString must not resolve to a built-in.
+function toSafeMap(object) {
+  if (object == null || typeof object !== 'object') {
+    return Object.create(null);
+  }
+  return Object.assign(Object.create(null), object);
+}
+
+function getPeerModules(peerInfo) {
+  return toSafeMap(peerInfo && peerInfo.modules);
+}
 
 function removeQueryString(string) {
   return string.replace(/\?.*$/, '');
@@ -40,8 +61,8 @@ function getPeerModuleMatchScore(nodeInfo, peerInfo, moduleName) {
     return 0;
   }
 
-  let nodeModuleData = nodeModules[moduleName];
-  let peerModuleData = peerModules[moduleName];
+  let nodeModuleData = toSafeMap(nodeModules)[moduleName];
+  let peerModuleData = toSafeMap(peerModules)[moduleName];
   if (!nodeModuleData) {
     return 0;
   }
@@ -49,8 +70,10 @@ function getPeerModuleMatchScore(nodeInfo, peerInfo, moduleName) {
     return 0;
   }
 
+  let safePeerModuleData = toSafeMap(peerModuleData);
+
   return Object.keys(nodeModuleData).reduce((score, field) => {
-    if (nodeModuleData[field] === peerModuleData[field]) {
+    if (nodeModuleData[field] === safePeerModuleData[field]) {
       return score + 1;
     }
     return score;
@@ -96,20 +119,22 @@ function doesPeerMatchRoute(peerInfo, routeString) {
   if (!peerInfo.modules) {
     return false;
   }
+  let peerModules = getPeerModules(peerInfo);
   let routeStringParts = routeString.split(',');
   for (let requirementString of routeStringParts) {
     let {pathname, query} = parseRouteRequirement(requirementString);
-    let moduleData = peerInfo.modules[pathname];
+    let moduleData = peerModules[pathname];
     if (!moduleData) {
       return false;
     }
+    let safeModuleData = toSafeMap(moduleData);
     let peerHasRequiredModuleFields;
 
     let {match, ...plainQuery} = query;
     if (match === 'or') {
       peerHasRequiredModuleFields = Object.keys(plainQuery).some(
         (field) => {
-          let moduleValue = moduleData[field];
+          let moduleValue = safeModuleData[field];
           let queryValue = plainQuery[field];
           if (Array.isArray(queryValue)) {
             return queryValue.some((value) => doValuesMatch(moduleValue, value));
@@ -120,7 +145,7 @@ function doesPeerMatchRoute(peerInfo, routeString) {
     } else {
       peerHasRequiredModuleFields = Object.keys(plainQuery).every(
         (field) => {
-          return doValuesMatch(moduleData[field], plainQuery[field]);
+          return doValuesMatch(safeModuleData[field], plainQuery[field]);
         }
       );
     }
@@ -132,41 +157,154 @@ function doesPeerMatchRoute(peerInfo, routeString) {
   return true;
 }
 
+function expandIpv6Address(ipAddress) {
+  let address = ipAddress.replace(/^\[/, '').replace(/\]$/, '').replace(/%.*$/, '');
+  // A trailing IPv4 part (as in ::ffff:1.2.3.4) is worth two hextets.
+  let ipv4SuffixMatch = address.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4SuffixMatch) {
+    let octets = ipv4SuffixMatch.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) {
+      return null;
+    }
+    let highHextet = ((octets[0] << 8) | octets[1]).toString(16);
+    let lowHextet = ((octets[2] << 8) | octets[3]).toString(16);
+    address = `${address.slice(0, ipv4SuffixMatch.index)}${highHextet}:${lowHextet}`;
+  }
+  let compressedParts = address.split('::');
+  if (compressedParts.length > 2) {
+    return null;
+  }
+  let headHextets = compressedParts[0] ? compressedParts[0].split(':') : [];
+  let tailHextets = compressedParts.length === 2 && compressedParts[1] ?
+    compressedParts[1].split(':') : [];
+  let hextets;
+  if (compressedParts.length === 2) {
+    let zeroFillLength = 8 - headHextets.length - tailHextets.length;
+    if (zeroFillLength < 0) {
+      return null;
+    }
+    hextets = [...headHextets, ...new Array(zeroFillLength).fill('0'), ...tailHextets];
+  } else {
+    hextets = headHextets;
+  }
+  if (hextets.length !== 8) {
+    return null;
+  }
+  if (!hextets.every((hextet) => /^[0-9a-f]{1,4}$/.test(hextet))) {
+    return null;
+  }
+  return hextets.map((hextet) => hextet.padStart(4, '0'));
+}
+
+// Groups an address for the per-subnet cap: /24 for IPv4, /64 for IPv6.
+// Normalized first so a peer cannot evade the cap by varying notation.
+function getPeerSubnetKey(ipAddress) {
+  if (typeof ipAddress !== 'string') {
+    return `invalid:${String(ipAddress)}`;
+  }
+  let address = ipAddress.trim().toLowerCase();
+  // Unwrap IPv4-mapped IPv6 so it is capped as the IPv4 address it is.
+  let ipv4MappedMatch = address.match(
+    /^\[?::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]?$/
+  );
+  if (ipv4MappedMatch) {
+    address = ipv4MappedMatch[1];
+  }
+  let ipv4Parts = address.split('.');
+  let isIpv4Address = ipv4Parts.length === 4 &&
+    ipv4Parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) < 256);
+  if (isIpv4Address) {
+    return `v4:${ipv4Parts.slice(0, 3).join('.')}`;
+  }
+  if (address.includes(':')) {
+    let hextets = expandIpv6Address(address);
+    if (hextets) {
+      return `v6:${hextets.slice(0, 4).join(':')}`;
+    }
+  }
+  // Unrecognized format: cap the exact string so it is still limited.
+  return `other:${address}`;
+}
+
+function incrementCount(counts, key) {
+  counts.set(key, (counts.get(key) || 0) + 1);
+}
+
+// Takes up to maxPeersToTake peers, holding to the caps. Needed here as well as
+// at selection time: the pool is truncated, so a flood sharing one IP or subnet
+// would crowd honest peers out of it and starve the node of connections.
+function takeDiversePeers(peerList, maxPeersToTake, maxPeersPerIpAddress, maxPeersPerSubnet) {
+  let takenPeers = [];
+  let ipAddressCounts = new Map();
+  let subnetCounts = new Map();
+  for (let peerInfo of peerList) {
+    if (takenPeers.length >= maxPeersToTake) {
+      break;
+    }
+    let subnetKey = getPeerSubnetKey(peerInfo.ipAddress);
+    let isWithinIpAddressLimit = (ipAddressCounts.get(peerInfo.ipAddress) || 0) < maxPeersPerIpAddress;
+    let isWithinSubnetLimit = (subnetCounts.get(subnetKey) || 0) < maxPeersPerSubnet;
+    if (!isWithinIpAddressLimit || !isWithinSubnetLimit) {
+      continue;
+    }
+    takenPeers.push(peerInfo);
+    incrementCount(ipAddressCounts, peerInfo.ipAddress);
+    incrementCount(subnetCounts, subnetKey);
+  }
+  return takenPeers;
+}
+
 function interchainSelectForConnection(input) {
   let disconnectedKnownPeers = [...input.disconnectedNewPeers, ...input.disconnectedTriedPeers];
   let connectedKnownPeers = [...input.connectedNewPeers, ...input.connectedTriedPeers];
   let nodeInfo = input.nodeInfo || {};
   let nodeModulesList = Object.keys(nodeInfo.modules || {}).filter((moduleName) => moduleName != null);
   let maxPeersToAllocatePerModule = input.maxOutboundPeerCount;
+  let maxPeersPerIpAddress = input.maxOutboundPeersPerIpAddress == null ?
+    DEFAULT_MAX_OUTBOUND_PEERS_PER_IP_ADDRESS : input.maxOutboundPeersPerIpAddress;
+  let maxPeersPerSubnet = input.maxOutboundPeersPerSubnet == null ?
+    DEFAULT_MAX_OUTBOUND_PEERS_PER_SUBNET : input.maxOutboundPeersPerSubnet;
 
-  let disconnectedModulePeerMap = {};
+  let hasPeerModule = (peerInfo, moduleName) => Boolean(getPeerModules(peerInfo)[moduleName]);
+
+  let disconnectedModulePeerMap = Object.create(null);
   let moduleQuotas = [];
   nodeModulesList.forEach((moduleName) => {
     let maxSimilarPeersToAllocate = Math.round(maxPeersToAllocatePerModule / 2);
     let disconnectedModulePeers = disconnectedKnownPeers
-      .filter((peerInfo) => peerInfo.modules && peerInfo.modules[moduleName]);
-    let sortedDisconnectedModulePeers = disconnectedModulePeers
-      .sort((peerInfoA, peerInfoB) => {
-        let peerAScore = getPeerModuleMatchScore(nodeInfo, peerInfoA, moduleName);
-        let peerBScore = getPeerModuleMatchScore(nodeInfo, peerInfoB, moduleName);
-        if (peerAScore > peerBScore) {
-          return -1;
-        }
-        if (peerAScore < peerBScore) {
-          return 1;
-        }
-        return Math.random() < .5 ? -1 : 1;
-      });
-    let mostSimilarDisconnectedModulePeers = sortedDisconnectedModulePeers
-      .slice(0, maxSimilarPeersToAllocate);
-    let remainingModulePeers = shuffle(sortedDisconnectedModulePeers.slice(maxSimilarPeersToAllocate));
-    let remainingPeersToAllocate = maxPeersToAllocatePerModule - maxSimilarPeersToAllocate;
-    let randomModulePeers = remainingModulePeers.slice(0, remainingPeersToAllocate);
+      .filter((peerInfo) => hasPeerModule(peerInfo, moduleName));
+    // Shuffle, then stable-sort by score, so equal scores land in a uniformly
+    // random order. A random comparator is non-transitive and biases towards
+    // whichever peer was listed first, which peer discovery can influence.
+    let sortedDisconnectedModulePeers = secureShuffle(disconnectedModulePeers)
+      .map((peerInfo) => ({
+        peerInfo,
+        score: getPeerModuleMatchScore(nodeInfo, peerInfo, moduleName)
+      }))
+      .sort((entryA, entryB) => entryB.score - entryA.score)
+      .map((entry) => entry.peerInfo);
+    let mostSimilarDisconnectedModulePeers = takeDiversePeers(
+      sortedDisconnectedModulePeers,
+      maxSimilarPeersToAllocate,
+      maxPeersPerIpAddress,
+      maxPeersPerSubnet
+    );
+    let mostSimilarPeerSet = new Set(mostSimilarDisconnectedModulePeers);
+    let remainingModulePeers = secureShuffle(
+      sortedDisconnectedModulePeers.filter((peerInfo) => !mostSimilarPeerSet.has(peerInfo))
+    );
+    let remainingPeersToAllocate = maxPeersToAllocatePerModule - mostSimilarDisconnectedModulePeers.length;
+    let randomModulePeers = takeDiversePeers(
+      remainingModulePeers,
+      remainingPeersToAllocate,
+      maxPeersPerIpAddress,
+      maxPeersPerSubnet
+    );
 
     disconnectedModulePeerMap[moduleName] = [...mostSimilarDisconnectedModulePeers, ...randomModulePeers];
 
     let outboundConnectedModulePeers = connectedKnownPeers
-      .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND && peerInfo.modules && peerInfo.modules[moduleName]);
+      .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND && hasPeerModule(peerInfo, moduleName));
 
     moduleQuotas.push({
       moduleName,
@@ -175,16 +313,21 @@ function interchainSelectForConnection(input) {
   });
 
   let filterUnrelatedPeers = (peerInfo) => {
-    if (!peerInfo.modules) {
-      return true;
-    }
-    return nodeModulesList.every((moduleName) => !peerInfo.modules[moduleName]);
+    let peerModules = getPeerModules(peerInfo);
+    return nodeModulesList.every((moduleName) => !peerModules[moduleName]);
   };
 
-  let disconnectedUnrelatedPeers = shuffle(disconnectedKnownPeers.filter(filterUnrelatedPeers));
+  let disconnectedUnrelatedPeers = takeDiversePeers(
+    secureShuffle(disconnectedKnownPeers.filter(filterUnrelatedPeers)),
+    maxPeersToAllocatePerModule,
+    maxPeersPerIpAddress,
+    maxPeersPerSubnet
+  );
 
-  let outboundConnectedUnrelatedPeers = connectedKnownPeers
-    .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND)
+  let outboundConnectedPeers = connectedKnownPeers
+    .filter((peerInfo) => peerInfo.kind === PEER_KIND_OUTBOUND);
+
+  let outboundConnectedUnrelatedPeers = outboundConnectedPeers
     .filter(filterUnrelatedPeers);
 
   moduleQuotas.push({
@@ -192,17 +335,23 @@ function interchainSelectForConnection(input) {
     quota: maxPeersToAllocatePerModule - outboundConnectedUnrelatedPeers.length
   });
 
-  let sortModuleQuotas = (quotaA, quotaB) => {
-    if (quotaA.quota > quotaB.quota) {
-      return 1;
-    }
-    if (quotaA.quota < quotaB.quota) {
-      return -1;
-    }
-    return Math.random() < .5 ? -1 : 1;
+  let sortModuleQuotas = () => {
+    // Shuffle-then-stable-sort as above. Ascending, so the neediest is last.
+    moduleQuotas = secureShuffle(moduleQuotas)
+      .sort((quotaA, quotaB) => quotaA.quota - quotaB.quota);
   };
 
-  moduleQuotas.sort(sortModuleQuotas);
+  sortModuleQuotas();
+
+  // Seed the caps with existing connections, else a host accumulates slots
+  // across rounds.
+  let ipAddressCounts = new Map();
+  let subnetCounts = new Map();
+
+  for (let peerInfo of outboundConnectedPeers) {
+    incrementCount(ipAddressCounts, peerInfo.ipAddress);
+    incrementCount(subnetCounts, getPeerSubnetKey(peerInfo.ipAddress));
+  }
 
   let peerLimit = (input.maxOutboundPeerCount * moduleQuotas.length) - input.outboundPeerCount;
   let selectedPeerMap = new Map();
@@ -221,10 +370,15 @@ function interchainSelectForConnection(input) {
     if (targetPeers.length) {
       let peerInfo = targetPeers.pop();
       let peerId = `${peerInfo.ipAddress}:${peerInfo.wsPort}`;
-      if (!selectedPeerMap.has(peerId)) {
+      let subnetKey = getPeerSubnetKey(peerInfo.ipAddress);
+      let isWithinIpAddressLimit = (ipAddressCounts.get(peerInfo.ipAddress) || 0) < maxPeersPerIpAddress;
+      let isWithinSubnetLimit = (subnetCounts.get(subnetKey) || 0) < maxPeersPerSubnet;
+      if (!selectedPeerMap.has(peerId) && isWithinIpAddressLimit && isWithinSubnetLimit) {
         selectedPeerMap.set(peerId, peerInfo);
+        incrementCount(ipAddressCounts, peerInfo.ipAddress);
+        incrementCount(subnetCounts, subnetKey);
         topModuleQuota.quota--;
-        moduleQuotas.sort(sortModuleQuotas);
+        sortModuleQuotas();
       }
     } else {
       moduleQuotas.pop();
@@ -238,7 +392,9 @@ function interchainSelectForConnection(input) {
 }
 
 function selectUniqueMatchingPeersByIp(peerList, routeString) {
-  let uniquePeerGroups = {};
+  // Null-prototype: a remote-supplied ipAddress of __proto__ or constructor
+  // must not resolve to an inherited built-in.
+  let uniquePeerGroups = Object.create(null);
   for (let peerInfo of peerList) {
     if (!doesPeerMatchRoute(peerInfo, routeString)) {
       continue;
@@ -250,7 +406,7 @@ function selectUniqueMatchingPeersByIp(peerList, routeString) {
   }
   let uniquePeerGroupList = Object.values(uniquePeerGroups);
   return uniquePeerGroupList.map((peerGroup) => {
-    let randomIndex = Math.floor(Math.random() * peerGroup.length);
+    let randomIndex = secureRandomInt(peerGroup.length);
     return peerGroup[randomIndex];
   });
 }
@@ -282,9 +438,11 @@ function interchainSelectForRequest(input) {
 
 function interchainSelectForSend(input) {
   let {peers, messagePacket} = input;
-  let uniquePeers = {};
+  // Null-prototype: a remote-supplied __proto__ key would otherwise repoint
+  // this map's prototype at an attacker-controlled peer.
+  let uniquePeers = Object.create(null);
   for (let peer of peers) {
-    if (!uniquePeers[peer.ipAddress] || Math.random() < .5) {
+    if (!uniquePeers[peer.ipAddress] || secureRandomBoolean()) {
       uniquePeers[peer.ipAddress] = peer;
     }
   }

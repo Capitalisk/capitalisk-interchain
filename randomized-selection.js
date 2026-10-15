@@ -1,4 +1,4 @@
-const shuffle = require('lodash.shuffle');
+const {secureShuffle} = require('./secure-random');
 
 let randomizedSelectForRequestFunction = (input) => {
     let { peers } = input;
@@ -7,13 +7,13 @@ let randomizedSelectForRequestFunction = (input) => {
         return [];
     }
     if (peerLimit === undefined) {
-        return shuffle(peers);
+        return secureShuffle(peers);
     }
-    return shuffle(peers).slice(0, peerLimit);
+    return secureShuffle(peers).slice(0, peerLimit);
 };
 
 let randomizedSelectForSendFunction = (input) => {
-    let shuffledPeers = shuffle(input.peers);
+    let shuffledPeers = secureShuffle(input.peers);
     let peerLimit = input.peerLimit;
     let halfPeerLimit = Math.round(peerLimit / 2);
     let outboundPeers = shuffledPeers.filter((peerInfo) => peerInfo.kind === 'outbound');

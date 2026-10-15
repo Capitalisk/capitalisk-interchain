@@ -1,6 +1,6 @@
 {
   "name": "capitalisk-interchain",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "description": "Custom peer selector plugin for Lisk interchain.",
   "main": "index.js",
   "scripts": {
@@ -21,8 +21,5 @@
   "bugs": {
     "url": "https://github.com/jondubois/lisk-interchain/issues"
   },
-  "homepage": "https://github.com/jondubois/lisk-interchain#readme",
-  "dependencies": {
-    "lodash.shuffle": "^4.2.0"
-  }
+  "homepage": "https://github.com/jondubois/lisk-interchain#readme"
 }
